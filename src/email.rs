@@ -30,22 +30,6 @@ impl std::convert::From<rsa::errors::Error> for VerificationError {
 }
 
 impl<'a> Email<'a> {
-    /// Verify the mail after loading the public key from the DNS.
-    pub fn verify(&self) -> Result<(), VerificationError> {
-        let header = match &self.dkim_header {
-            Some(dkim_header) => dkim_header,
-            None => return Err(VerificationError::MissingDkimHeader),
-        };
-
-        let records = PublicKey::load(&header.selector, &header.sdid).unwrap();
-        let public_key = records
-            .iter()
-            .filter_map(|r| PublicKey::try_from(r.as_str()).ok())
-            .nth(0)
-            .unwrap();
-        self.verify_with_public_key(&public_key)
-    }
-
     /// Verify the mail using an existing public key (does not use the DNS).
     pub fn verify_with_public_key(&self, public_key: &PublicKey) -> Result<(), VerificationError> {
         use rsa::{PublicKey, RSAPublicKey};

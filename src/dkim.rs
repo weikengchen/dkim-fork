@@ -11,7 +11,6 @@ pub struct Header<'a> {
     pub(crate) algorithm: SigningAlgorithm,
     pub(crate) signature: Vec<u8>,
     pub(crate) body_hash: Vec<u8>,
-    pub(crate) query_method: &'a str,
     pub(crate) canonicalization: (CanonicalizationType, CanonicalizationType),
     pub(crate) sdid: &'a str,
     pub(crate) selector: &'a str,
@@ -48,7 +47,6 @@ impl<'a> Header<'a> {
                 "subject",
                 "to",
             ],
-            query_method: "dns/txt",
             copied_headers: None,
             auid: None,
             body_lenght: None,
@@ -151,7 +149,6 @@ impl<'a> Header<'a> {
             sdid: sdid.ok_or_else(|| HeaderParsingError::MissingField("d"))?,
             selector: selector.ok_or_else(|| HeaderParsingError::MissingField("s"))?,
             signed_headers: signed_headers.ok_or_else(|| HeaderParsingError::MissingField("h"))?,
-            query_method: query_methods.unwrap_or("dns/txt"),
             copied_headers,
             auid,
             body_lenght,
@@ -337,16 +334,16 @@ impl<'a> std::convert::From<ParsingError> for HeaderParsingError<'a> {
 }
 
 #[derive(Debug)]
-pub enum PublicKeyParsingError<'a> {
+pub enum PublicKeyParsingError {
     MissingTag(&'static str),
     DuplicatedField(&'static str),
-    UnsupportedDkimVersion(&'a str),
+    UnsupportedDkimVersion(String),
     UnexpectedService,
     MissingRecord,
     ParsingError(ParsingError),
 }
 
-impl<'a> From<ParsingError> for PublicKeyParsingError<'a> {
+impl From<ParsingError> for PublicKeyParsingError {
     fn from(e: ParsingError) -> Self {
         PublicKeyParsingError::ParsingError(e)
     }
@@ -354,37 +351,32 @@ impl<'a> From<ParsingError> for PublicKeyParsingError<'a> {
 
 /// A struct reprensenting a DKIM dns record. (contains the public key and a few optional fields)
 #[derive(Debug)]
-pub struct PublicKey<'a> {
-    pub(crate) acceptable_hash_algorithms: Option<Vec<&'a str>>,
-    pub(crate) key_type: &'a str,
+pub struct PublicKey {
     pub(crate) key_data: Vec<u8>,
-    pub(crate) service_types: Vec<&'a str>,
-    pub(crate) flags: Vec<&'a str>,
-    pub(crate) notes: Option<String>,
 }
 
-impl<'a> TryFrom<&'a str> for PublicKey<'a> {
-    type Error = PublicKeyParsingError<'a>;
+impl TryFrom<&str> for PublicKey {
+    type Error = PublicKeyParsingError;
 
     #[allow(clippy::many_single_char_names)]
-    fn try_from(input: &'a str) -> Result<PublicKey, PublicKeyParsingError> {
+    fn try_from(input: &str) -> Result<PublicKey, PublicKeyParsingError> {
         use crate::parsing::dns_record::Tag;
 
-        let mut version: Option<&'a str> = None;
-        let mut acceptable_hash_algorithms: Option<Vec<&'a str>> = None;
-        let mut key_type: Option<&'a str> = None;
+        let mut version: Option<&str> = None;
+        let mut acceptable_hash_algorithms: Option<Vec<&str>> = None;
+        let mut key_type: Option<&str> = None;
         let mut key_data: Option<Vec<u8>> = None;
-        let mut service_types: Option<Vec<&'a str>> = None;
-        let mut flags: Option<Vec<&'a str>> = None;
+        let mut service_types: Option<Vec<&str>> = None;
+        let mut flags: Option<Vec<&str>> = None;
         let mut notes: Option<String> = None;
 
         for tag in tag_list(input, &dns_record_tag)? {
             #[inline(always)]
-            fn replace<'a, T>(
+            fn replace<T>(
                 to: &mut Option<T>,
                 from: T,
                 name: &'static str,
-            ) -> Result<(), PublicKeyParsingError<'a>> {
+            ) -> Result<(), PublicKeyParsingError> {
                 if to.replace(from).is_some() {
                     Err(PublicKeyParsingError::DuplicatedField(name))
                 } else {
@@ -408,7 +400,7 @@ impl<'a> TryFrom<&'a str> for PublicKey<'a> {
 
         if let Some(version) = version {
             if version != "DKIM1" {
-                return Err(PublicKeyParsingError::UnsupportedDkimVersion(version));
+                return Err(PublicKeyParsingError::UnsupportedDkimVersion(version.to_string()));
             }
         }
 
@@ -419,60 +411,18 @@ impl<'a> TryFrom<&'a str> for PublicKey<'a> {
         }
 
         Ok(PublicKey {
-            acceptable_hash_algorithms,
-            key_type: key_type.unwrap_or("rsa"),
             key_data: key_data.ok_or(PublicKeyParsingError::MissingTag("p"))?,
-            service_types: service_types.unwrap_or(vec!["*"]),
-            flags: flags.unwrap_or(Vec::new()),
-            notes,
         })
     }
 }
 
-impl<'a> PublicKey<'a> {
+impl PublicKey {
     /// Creates a new PublicKey with all fields specified.
     pub fn new(
-        acceptable_hash_algorithms: Option<Vec<&'a str>>,
-        key_type: &'a str,
         key_data: Vec<u8>,
-        service_types: Vec<&'a str>,
-        flags: Vec<&'a str>,
-        notes: Option<String>,
-    ) -> PublicKey<'a> {
+    ) -> PublicKey{
         PublicKey {
-            acceptable_hash_algorithms,
-            key_type,
             key_data,
-            service_types,
-            flags,
-            notes,
-        }
-    }
-
-    /// Loads a public key from the DNS.
-    pub fn load(selector: &str, domain: &str) -> Result<Vec<String>, PublicKeyParsingError<'a>> {
-        use trust_dns_resolver::config::*;
-        use trust_dns_resolver::Resolver;
-
-        let resolver = Resolver::new(ResolverConfig::default(), ResolverOpts::default()).unwrap();
-        let txt_fields = resolver
-            .txt_lookup(&format!("{}._domainkey.{}", selector, domain))
-            .unwrap();
-
-        let mut records = Vec::new();
-        for packets in txt_fields.iter().map(|data| data.txt_data()) {
-            let mut response = Vec::new();
-            for packet in packets {
-                response.extend(packet.iter());
-            }
-            let response = String::from_utf8(response).unwrap();
-            records.push(response);
-        }
-
-        if records.is_empty() {
-            Err(PublicKeyParsingError::MissingRecord)
-        } else {
-            Ok(records)
         }
     }
 }
@@ -488,10 +438,5 @@ mod tests {
         println!("{:?}", header);
         println!("{:?}", header.to_string());
         println!("{:?}", header.original.unwrap());
-    }
-
-    #[test]
-    fn get_dkim_record() {
-        println!("{:?}", PublicKey::load("20161025", "gmail.com").unwrap());
     }
 }
